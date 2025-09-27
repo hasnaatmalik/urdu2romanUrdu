@@ -1,3 +1,6 @@
+%%writefile app.py
+# Replace your current app.py with this corrected version:
+
 import os
 import io
 import json
@@ -16,7 +19,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # -------------------------
-# Constants (Kaggle defaults)
+# Constants
 # -------------------------
 DEFAULT_BPE_PATH = "bpe_model.pkl"
 DEFAULT_CKPT_PATH = "best_model.pt"
@@ -105,7 +108,7 @@ class UrduRomanBPE:
         return text.strip()
 
 # -------------------------
-# Model Architecture (same as before)
+# Model Architecture
 # -------------------------
 class BiLSTMEncoder(nn.Module):
     def __init__(self, vocab_size: int, embedding_dim: int, hidden_dim: int,
@@ -144,7 +147,7 @@ class LSTMDecoder(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
-        # Change these lines to match your trained model:
+        # Match the layer names from your trained model
         self.attention = nn.Linear(hidden_dim + encoder_hidden_dim * 2, encoder_hidden_dim * 2)
         self.out_projection = nn.Linear(hidden_dim + encoder_hidden_dim * 2, vocab_size)
         self.dropout = nn.Dropout(dropout)
@@ -156,17 +159,18 @@ class LSTMDecoder(nn.Module):
         enc_len = encoder_outputs.size(1)
         top_rep = top_hidden.repeat(1, enc_len, 1)
         att_in = torch.cat([top_rep, encoder_outputs], dim=2)
-        # Change this line:
         scores = self.attention(att_in)
         scores = torch.sum(scores * encoder_outputs, dim=2)
+        
+        # FIX: Use non-in-place operation to avoid gradient issues
         if mask is not None:
-            scores.masked_fill_(mask == 0, -1e9)
+            scores = scores.masked_fill(mask == 0, -1e9)  # Remove underscore
+        
         att_w = F.softmax(scores, dim=1)
         context = torch.bmm(att_w.unsqueeze(1), encoder_outputs)
         lstm_in = torch.cat([emb, context], dim=2)
         lstm_out, (hidden, cell) = self.lstm(lstm_in, (hidden, cell))
         out_in = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)
-        # Change this line:
         logits = self.out_projection(out_in)
         return logits, hidden, cell, att_w
 
@@ -218,7 +222,7 @@ class Seq2SeqModel(nn.Module):
             return torch.stack(outputs, dim=1), torch.stack(attns, dim=1)
 
 # -------------------------
-# Caching functions (FIXED)
+# Caching functions
 # -------------------------
 @st.cache_resource(show_spinner=True)
 def load_bpe(bpe_path: str):
@@ -227,7 +231,7 @@ def load_bpe(bpe_path: str):
     return bpe
 
 @st.cache_resource(show_spinner=True)
-def load_model(ckpt_path: str, _bpe: UrduRomanBPE):  # Added underscore to prevent hashing
+def load_model(ckpt_path: str, _bpe: UrduRomanBPE):
     enc_vocab = len(_bpe.urdu_vocab)
     dec_vocab = len(_bpe.roman_vocab)
     model = Seq2SeqModel(encoder_vocab_size=enc_vocab, decoder_vocab_size=dec_vocab,
@@ -246,7 +250,7 @@ def load_model(ckpt_path: str, _bpe: UrduRomanBPE):  # Added underscore to preve
     return model, history
 
 # -------------------------
-# Helper functions (same as before)
+# Helper functions
 # -------------------------
 def make_src_tensor(bpe: UrduRomanBPE, urdu_texts: List[str], max_len: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
     sos = bpe.urdu_vocab['<SOS>']; eos = bpe.urdu_vocab['<EOS>']; pad = bpe.urdu_vocab['<PAD>']
@@ -296,7 +300,7 @@ def urdu_token_visuals(bpe: UrduRomanBPE, urdu_text: str, max_len: int = 50) -> 
     return toks
 
 # -------------------------
-# Streamlit UI (same as before)
+# Streamlit UI
 # -------------------------
 st.set_page_config(page_title="Urdu → Roman Urdu (Seq2Seq + BPE)", page_icon="🔤", layout="wide")
 st.title("🔤 Urdu → Roman Urdu Translator (Seq2Seq + BPE)")
@@ -342,25 +346,28 @@ with col1:
     urdu_text = st.text_area("Urdu text", value="تو کبھی خود کو بھی دیکھے گا تو ڈر جائے گا", height=120)
     run_single = st.button("Translate")
     if run_single and bpe is not None and model is not None:
-        src, src_len = make_src_tensor(bpe, [urdu_text], max_len=max_len)
-        sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
-        t0 = time.time()
-        preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
-        infer_ms = (time.time() - t0)*1000.0
-        pred_ids = preds[0].detach().cpu().tolist()
-        roman = decode_pred_tokens(bpe, pred_ids)
-        st.write(f"**Roman:** {roman}")
-        st.caption(f"Inference: {infer_ms:.1f} ms")
-        if show_prob:
-            st.code(f"Pred IDs: {pred_ids}")
+        try:
+            src, src_len = make_src_tensor(bpe, [urdu_text], max_len=max_len)
+            sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
+            t0 = time.time()
+            preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
+            infer_ms = (time.time() - t0)*1000.0
+            pred_ids = preds[0].detach().cpu().tolist()
+            roman = decode_pred_tokens(bpe, pred_ids)
+            st.write(f"**Roman:** {roman}")
+            st.caption(f"Inference: {infer_ms:.1f} ms")
+            if show_prob:
+                st.code(f"Pred IDs: {pred_ids}")
 
-        with st.expander("Show attention heatmap"):
-            att_np = attns[0].detach().cpu().numpy()
-            ur_vis = urdu_token_visuals(bpe, urdu_text, max_len=max_len)
-            roman_vis = roman.split() if roman.strip() else [""]
-            tgt_len = min(len(roman_vis), att_np.shape[0])
-            src_len_vis = min(len(ur_vis), att_np.shape[1])
-            draw_attention(att_np[:tgt_len, :src_len_vis], ur_vis[:src_len_vis], roman_vis[:tgt_len])
+            with st.expander("Show attention heatmap"):
+                att_np = attns[0].detach().cpu().numpy()
+                ur_vis = urdu_token_visuals(bpe, urdu_text, max_len=max_len)
+                roman_vis = roman.split() if roman.strip() else [""]
+                tgt_len = min(len(roman_vis), att_np.shape[0])
+                src_len_vis = min(len(ur_vis), att_np.shape[1])
+                draw_attention(att_np[:tgt_len, :src_len_vis], ur_vis[:src_len_vis], roman_vis[:tgt_len])
+        except Exception as e:
+            st.error(f"Translation failed: {e}")
 
 # Batch translation
 with col2:
@@ -374,18 +381,21 @@ with col2:
         if not lines:
             st.warning("No non-empty lines found.")
         else:
-            src, src_len = make_src_tensor(bpe, lines, max_len=max_len)
-            sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
-            preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
-            out = []
-            for i, line in enumerate(lines):
-                ids = preds[i].detach().cpu().tolist()
-                out.append((line, decode_pred_tokens(bpe, ids)))
-            st.markdown("**Results**")
-            for ur, ro in out:
-                st.write("—")
-                st.write(f"**Urdu:** {ur}")
-                st.write(f"**Roman:** {ro}")
+            try:
+                src, src_len = make_src_tensor(bpe, lines, max_len=max_len)
+                sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
+                preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
+                out = []
+                for i, line in enumerate(lines):
+                    ids = preds[i].detach().cpu().tolist()
+                    out.append((line, decode_pred_tokens(bpe, ids)))
+                st.markdown("**Results**")
+                for ur, ro in out:
+                    st.write("—")
+                    st.write(f"**Urdu:** {ur}")
+                    st.write(f"**Roman:** {ro}")
+            except Exception as e:
+                st.error(f"Batch translation failed: {e}")
 
 st.markdown("---")
 
@@ -406,21 +416,24 @@ if run_eval and bpe is not None and model is not None:
     if not (os.path.exists(urdu_file) and os.path.exists(roman_file)):
         st.error("Files not found.")
     else:
-        with open(urdu_file, 'r', encoding='utf-8') as f:
-            ur_lines = [l.strip() for l in f.readlines()]
-        with open(roman_file, 'r', encoding='utf-8') as f:
-            ro_lines = [l.strip() for l in f.readlines()]
-        n = min(eval_N, len(ur_lines), len(ro_lines))
-        ur = ur_lines[:n]; ro_ref = ro_lines[:n]
-        src, src_len = make_src_tensor(bpe, ur, max_len=max_len)
-        sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
-        preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
-        preds_txt = [decode_pred_tokens(bpe, preds[i].detach().cpu().tolist()) for i in range(n)]
-        for i in range(n):
-            st.write("—")
-            st.write(f"**Urdu:** {ur[i]}")
-            st.write(f"**Ref:**  {ro_ref[i]}")
-            st.write(f"**Pred:** {preds_txt[i]}")
+        try:
+            with open(urdu_file, 'r', encoding='utf-8') as f:
+                ur_lines = [l.strip() for l in f.readlines()]
+            with open(roman_file, 'r', encoding='utf-8') as f:
+                ro_lines = [l.strip() for l in f.readlines()]
+            n = min(eval_N, len(ur_lines), len(ro_lines))
+            ur = ur_lines[:n]; ro_ref = ro_lines[:n]
+            src, src_len = make_src_tensor(bpe, ur, max_len=max_len)
+            sos_t = bpe.roman_vocab['<SOS>']; eos_t = bpe.roman_vocab['<EOS>']
+            preds, attns = model.translate(src, max_length=max_len, sos_token=sos_t, eos_token=eos_t, src_lengths=src_len)
+            preds_txt = [decode_pred_tokens(bpe, preds[i].detach().cpu().tolist()) for i in range(n)]
+            for i in range(n):
+                st.write("—")
+                st.write(f"**Urdu:** {ur[i]}")
+                st.write(f"**Ref:**  {ro_ref[i]}")
+                st.write(f"**Pred:** {preds_txt[i]}")
+        except Exception as e:
+            st.error(f"Evaluation failed: {e}")
 
 st.markdown("---")
 
@@ -449,3 +462,6 @@ with c3:
         plt.xlabel("Epoch"); plt.ylabel("BLEU")
         st.pyplot(fig)
 
+st.caption("If charts are empty, your checkpoint might not contain these histories.")
+st.markdown("—")
+st.caption("Built for Urdu-Roman transliteration using BiLSTM + BPE")
