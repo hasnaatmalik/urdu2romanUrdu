@@ -227,15 +227,13 @@ class Seq2SeqModel(nn.Module):
             decoder_input = torch.full((batch_size, 1), sos_token, device=src.device, dtype=torch.long)
             
             outputs = []
-            attention_weights = []
             
             for step in range(max_length):
-                logits, decoder_hidden, decoder_cell, att_weights = self.decoder(
+                logits, decoder_hidden, decoder_cell, _ = self.decoder(
                     decoder_input, decoder_hidden, decoder_cell, encoder_outputs, mask
                 )
                 predictions = logits.argmax(dim=1)
                 outputs.append(predictions)
-                attention_weights.append(att_weights)
                 decoder_input = predictions.unsqueeze(1)
                 
                 if (predictions == eos_token).all():
@@ -243,12 +241,10 @@ class Seq2SeqModel(nn.Module):
             
             if outputs:
                 final_outputs = torch.stack(outputs, dim=1)
-                final_attention = torch.stack(attention_weights, dim=1)
             else:
                 final_outputs = torch.zeros((batch_size, 1), dtype=torch.long, device=src.device)
-                final_attention = torch.zeros((batch_size, 1, enc_seq_len), device=src.device)
             
-            return final_outputs, final_attention
+            return final_outputs
 
 # -------------------------
 # Caching and Helper Functions
@@ -267,7 +263,13 @@ def load_model(_bpe: UrduRomanBPE, ckpt_path: str):
                         embedding_dim=256, encoder_hidden_dim=512, decoder_hidden_dim=512,
                         encoder_layers=2, decoder_layers=4, dropout=0.3)
     ckpt = torch.load(ckpt_path, map_location=DEVICE)
-    model.load_state_dict(ckpt['model_state_dict'])
+    state_dict = ckpt['model_state_dict']
+    # Handle potential key mismatches
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('encoder.', 'enc.').replace('decoder.', 'dec.').replace('bridge_hidden', 'bridge_hidden').replace('bridge_cell', 'bridge_cell')
+        new_state_dict[new_key] = v
+    model.load_state_dict(new_state_dict, strict=False)
     model.to(DEVICE)
     model.eval()
     history = {
@@ -319,34 +321,6 @@ def decode_pred_tokens(bpe: UrduRomanBPE, pred_ids: List[int]) -> str:
             cleaned_tokens.append(token_id)
     
     return bpe.decode_roman(cleaned_tokens)
-
-def draw_attention(attn: np.ndarray, urdu_tokens_vis: List[str], roman_tokens_vis: List[str]):
-    if len(roman_tokens_vis) == 0 or len(urdu_tokens_vis) == 0:
-        st.warning("No tokens to visualize")
-        return
-        
-    fig, ax = plt.subplots(figsize=(min(12, 1 + 0.6*len(urdu_tokens_vis)), 
-                                   min(8, 1 + 0.5*len(roman_tokens_vis))))
-    im = ax.imshow(attn, aspect='auto', cmap='Blues')
-    
-    ax.set_xticks(np.arange(len(urdu_tokens_vis)))
-    ax.set_xticklabels(urdu_tokens_vis, rotation=45, ha='right')
-    ax.set_yticks(np.arange(len(roman_tokens_vis)))
-    ax.set_yticklabels(roman_tokens_vis)
-    ax.set_xlabel("Source (Urdu tokens)")
-    ax.set_ylabel("Generated Roman tokens")
-    ax.set_title("Attention Heatmap")
-    
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    st.pyplot(fig)
-
-def urdu_token_visuals(bpe: UrduRomanBPE, urdu_text: str, max_len: int = 50) -> List[str]:
-    ids = bpe.encode_urdu(urdu_text)
-    ids = [bpe.urdu_vocab['<SOS>']] + ids + [bpe.urdu_vocab['<EOS>']]
-    id2tok = {idx: tok for tok, idx in bpe.urdu_vocab.items()}
-    tokens = [id2tok.get(i, '<UNK>') for i in ids[:max_len]]
-    return tokens
 
 # -------------------------
 # Streamlit UI
@@ -403,7 +377,7 @@ with col1:
                 eos_token = bpe.roman_vocab['<EOS>']
                 
                 start_time = time.time()
-                predictions, attention = model.translate(
+                predictions = model.translate(
                     src_tensor, max_length=max_len, 
                     sos_token=sos_token, eos_token=eos_token, 
                     src_lengths=src_lengths
@@ -420,18 +394,6 @@ with col1:
                 if show_debug:
                     st.code(f"Token IDs: {pred_ids}")
             
-            # Attention visualization
-            with st.expander("🔍 Show Attention Heatmap"):
-                if attention is not None and attention.numel() > 0:
-                    att_matrix = attention[0].cpu().numpy()
-                    src_tokens = urdu_token_visuals(bpe, urdu_input, max_len)
-                    tgt_tokens = translation.split() if translation.strip() else ["<empty>"]
-                    
-                    att_matrix = att_matrix[:len(tgt_tokens), :len(src_tokens)]
-                    draw_attention(att_matrix, src_tokens, tgt_tokens)
-                else:
-                    st.warning("No attention weights available")
-                    
         except Exception as e:
             st.error(f"❌ Translation failed: {str(e)}")
 
@@ -456,7 +418,7 @@ with col2:
                     sos_token = bpe.roman_vocab['<SOS>']
                     eos_token = bpe.roman_vocab['<EOS>']
                     
-                    predictions, _ = model.translate(
+                    predictions = model.translate(
                         src_tensor, max_length=max_len,
                         sos_token=sos_token, eos_token=eos_token,
                         src_lengths=src_lengths
