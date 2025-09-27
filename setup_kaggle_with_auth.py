@@ -5,7 +5,7 @@ import os
 import time
 
 # ADD YOUR NGROK AUTH TOKEN HERE
-NGROK_TOKEN = "33GtxhCCI9sLJh56dTQwZsi3yXJ_893y1o6cdotRegzh78Zcd"  # Replace with your actual token
+NGROK_TOKEN = "YOUR TOKEN"  # Replace with your actual token
 
 def install_packages():
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"])
