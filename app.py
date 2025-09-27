@@ -223,8 +223,7 @@ class Seq2SeqModel(nn.Module):
         dc = self.bridge_cell(last_c).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         return dh, dc
 
-    def translate(self, src: torch.Tensor, max_length: int, sos_token: int, eos_token: int,
-                  src_lengths: Optional[torch.Tensor] = None):
+    def translate(self, src: torch.Tensor, max_length: int, sos_token: int, eos_token: int, src_lengths: Optional[torch.Tensor] = None):
         self.eval()
         with torch.no_grad():
             batch_size = src.size(0)
@@ -236,21 +235,13 @@ class Seq2SeqModel(nn.Module):
             # Bridge encoder to decoder
             decoder_hidden, decoder_cell = self._bridge(encoder_hidden, encoder_cell)
             
-            # Create proper attention mask
+            # Create proper attention mask based on encoder outputs
             if src_lengths is not None:
-                mask = torch.zeros(batch_size, src_seq_len, device=src.device, dtype=torch.float)
+                mask = torch.zeros(batch_size, encoder_outputs.size(1), device=src.device, dtype=torch.float)
                 for i, length in enumerate(src_lengths):
-                    mask[i, :min(length.item(), src_seq_len)] = 1.0
+                    mask[i, :min(length.item(), encoder_outputs.size(1))] = 1.0
             else:
                 mask = (src != 0).float()
-            
-            # Ensure mask shape matches exactly what decoder expects
-            if mask.size(1) != encoder_outputs.size(1):
-                if mask.size(1) > encoder_outputs.size(1):
-                    mask = mask[:, :encoder_outputs.size(1)]
-                else:
-                    pad_size = encoder_outputs.size(1) - mask.size(1)
-                    mask = F.pad(mask, (0, pad_size), value=0.0)
             
             # Initialize decoder input
             decoder_input = torch.full((batch_size, 1), sos_token, device=src.device, dtype=torch.long)
@@ -282,7 +273,7 @@ class Seq2SeqModel(nn.Module):
                 final_attention = torch.stack(attention_weights, dim=1)  # (B, T, S)
             else:
                 final_outputs = torch.zeros((batch_size, 1), dtype=torch.long, device=src.device)
-                final_attention = torch.zeros((batch_size, 1, src_seq_len), device=src.device)
+                final_attention = torch.zeros((batch_size, 1, encoder_outputs.size(1)), device=src.device)
             
             return final_outputs, final_attention
 
@@ -549,15 +540,6 @@ if history:
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
     
-    with chart_cols[2]:
-        if 'val_bleus' in history and history['val_bleus']:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(history['val_bleus'])
-            ax.set_title("Validation BLEU")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("BLEU Score")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
 
 st.markdown("---")
 st.caption("🚀 Urdu-Roman Neural Machine Translation • Built with PyTorch & Streamlit")
