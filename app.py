@@ -18,10 +18,10 @@ import matplotlib.pyplot as plt
 # -------------------------
 # Constants (Kaggle defaults)
 # -------------------------
-DEFAULT_BPE_PATH = "/kaggle/working/bpe_model.pkl"
-DEFAULT_CKPT_PATH = "/kaggle/working/best_model.pt"
-DEFAULT_URDU_FILE = "/kaggle/working/urdu.txt"
-DEFAULT_ROMAN_FILE = "/kaggle/working/roman.txt"
+DEFAULT_BPE_PATH = "bpe_model.pkl"
+DEFAULT_CKPT_PATH = "best_model.pt"
+DEFAULT_URDU_FILE = "urdu.txt"
+DEFAULT_ROMAN_FILE = "roman.txt"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
