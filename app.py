@@ -297,7 +297,7 @@ def urdu_token_visuals(bpe: UrduRomanBPE, urdu_text: str, max_len: int = 50) -> 
 # -------------------------
 st.set_page_config(page_title="Urdu → Roman Urdu (Seq2Seq + BPE)", page_icon="🔤", layout="wide")
 st.title("🔤 Urdu → Roman Urdu Translator (Seq2Seq + BPE)")
-st.caption(f"Device: **{DEVICE}** · Loads your `bpe_model.pkl` + `best_model.pt` from /kaggle/working by default.")
+st.caption(f"Device: **{DEVICE}** · Loads your `bpe_model.pkl` + `best_model.pt`")
 
 with st.sidebar:
     st.header("Artifacts")
