@@ -8,7 +8,6 @@ A comprehensive deep learning system for translating Urdu text to Roman Urdu usi
 - **LSTM Decoder**: 4-layer LSTM with attention mechanism for accurate generation
 - **Custom BPE**: Specialized tokenization for both Urdu and Roman scripts
 - **Web Interface**: Interactive Streamlit app with real-time translation
-- **Attention Visualization**: Heatmaps showing model attention patterns
 - **Batch Processing**: Translate multiple sentences simultaneously
 - **Comprehensive Evaluation**: BLEU score, Character Error Rate, and perplexity metrics
 
@@ -26,7 +25,6 @@ A comprehensive deep learning system for translating Urdu text to Roman Urdu usi
 - **Perplexity**: 1.75
 - **Training Duration**: 10 epochs
 - **Dataset**: 21,003 Urdu-Roman sentence pairs from Rekhta Ghazals
-- **Train/Validation Split**: 80/20
 
 ## 🎯 Example Translations
 
@@ -63,7 +61,7 @@ A comprehensive deep learning system for translating Urdu text to Roman Urdu usi
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/urdu-roman-transliteration.git
+git clone https://github.com/hasnaatmalik/urdu2romanUrdu
 cd urdu-roman-transliteration
 
 # Install dependencies
@@ -98,7 +96,6 @@ streamlit run app.py
 ### Single Translation
 - Input Urdu text and get instant Roman translation
 - Shows inference time and token IDs (debug mode)
-- Attention visualization with interactive heatmaps
 
 ### Batch Processing
 - Process multiple sentences at once
@@ -249,11 +246,7 @@ pip install -r requirements.txt
 - PyTorch: BSD License
 - Streamlit: Apache License 2.0
 
-## 🙏 Acknowledgments
 
-- **Rekhta Foundation** for providing the Urdu Ghazals dataset
-- **PyTorch Team** for the excellent deep learning framework
-- **Streamlit Team** for the intuitive web app framework
 
 ## 📞 Support & Contact
 
