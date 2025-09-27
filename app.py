@@ -1,5 +1,3 @@
-%%writefile app.py
-# Replace your current app.py with this corrected version:
 
 import os
 import io
