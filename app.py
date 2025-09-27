@@ -144,8 +144,9 @@ class LSTMDecoder(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
-        self.attn = nn.Linear(hidden_dim + encoder_hidden_dim * 2, encoder_hidden_dim * 2)
-        self.out = nn.Linear(hidden_dim + encoder_hidden_dim * 2, vocab_size)
+        # Change these lines to match your trained model:
+        self.attention = nn.Linear(hidden_dim + encoder_hidden_dim * 2, encoder_hidden_dim * 2)
+        self.out_projection = nn.Linear(hidden_dim + encoder_hidden_dim * 2, vocab_size)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, hidden: torch.Tensor, cell: torch.Tensor,
@@ -155,7 +156,8 @@ class LSTMDecoder(nn.Module):
         enc_len = encoder_outputs.size(1)
         top_rep = top_hidden.repeat(1, enc_len, 1)
         att_in = torch.cat([top_rep, encoder_outputs], dim=2)
-        scores = self.attn(att_in)
+        # Change this line:
+        scores = self.attention(att_in)
         scores = torch.sum(scores * encoder_outputs, dim=2)
         if mask is not None:
             scores.masked_fill_(mask == 0, -1e9)
@@ -164,7 +166,8 @@ class LSTMDecoder(nn.Module):
         lstm_in = torch.cat([emb, context], dim=2)
         lstm_out, (hidden, cell) = self.lstm(lstm_in, (hidden, cell))
         out_in = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)
-        logits = self.out(out_in)
+        # Change this line:
+        logits = self.out_projection(out_in)
         return logits, hidden, cell, att_w
 
 class Seq2SeqModel(nn.Module):
@@ -446,6 +449,3 @@ with c3:
         plt.xlabel("Epoch"); plt.ylabel("BLEU")
         st.pyplot(fig)
 
-st.caption("If charts are empty, your checkpoint might not contain these histories.")
-st.markdown("—")
-st.caption("Built for your Kaggle notebook artifacts: `bpe_model.pkl`, `best_model.pt`, and optional `urdu.txt`/`roman.txt`.")
