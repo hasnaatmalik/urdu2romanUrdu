@@ -150,51 +150,32 @@ class LSTMDecoder(nn.Module):
 
     def forward(self, x: torch.Tensor, hidden: torch.Tensor, cell: torch.Tensor,
                 encoder_outputs: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        # x: (B, 1), hidden: (L, B, H), cell: (L, B, H), encoder_outputs: (B, S, 2H)
         batch_size = x.size(0)
         enc_seq_len = encoder_outputs.size(1)
         
         emb = self.dropout(self.embedding(x))  # (B, 1, E)
         top_hidden = hidden[-1].unsqueeze(1)   # (B, 1, H)
         
-        # Repeat decoder hidden for each encoder position
         top_hidden_repeated = top_hidden.repeat(1, enc_seq_len, 1)  # (B, S, H)
-        
-        # Concatenate for attention computation
         att_input = torch.cat([top_hidden_repeated, encoder_outputs], dim=2)  # (B, S, H + 2H)
         
-        # Compute attention scores
         att_scores = self.attention(att_input)  # (B, S, 2H)
         
-        # Element-wise multiplication and sum to get scalar scores
-        scores = torch.sum(att_scores * encoder_outputs, dim=2)  # (B, S)
-        
-        # Apply mask - CRUCIAL FIX: ensure mask matches scores exactly
         if mask is not None:
-            # Make sure mask has exactly the same shape as scores
-            if mask.shape != scores.shape:
-                # Resize mask to match scores
-                mask = mask[:, :scores.size(1)]  # Truncate if needed
-                if mask.size(1) < scores.size(1):
-                    # Pad with zeros if mask is shorter
-                    pad_size = scores.size(1) - mask.size(1)
+            if mask.shape[1] != enc_seq_len:
+                if mask.shape[1] > enc_seq_len:
+                    mask = mask[:, :enc_seq_len]
+                else:
+                    pad_size = enc_seq_len - mask.shape[1]
                     mask = F.pad(mask, (0, pad_size), value=0.0)
-            
-            scores = scores.masked_fill(mask == 0, -1e9)
+            att_scores = att_scores.masked_fill(mask.unsqueeze(2) == 0, -1e9)
         
-        # Compute attention weights
-        att_weights = F.softmax(scores, dim=1)  # (B, S)
-        
-        # Compute context vector
+        att_weights = F.softmax(att_scores.sum(dim=2), dim=1)  # (B, S)
         context = torch.bmm(att_weights.unsqueeze(1), encoder_outputs)  # (B, 1, 2H)
         
-        # Concatenate embedding with context
         lstm_input = torch.cat([emb, context], dim=2)  # (B, 1, E + 2H)
-        
-        # LSTM forward
         lstm_out, (hidden, cell) = self.lstm(lstm_input, (hidden, cell))
         
-        # Final output projection
         output_input = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)  # (B, H + 2H)
         logits = self.out_projection(output_input)  # (B, V)
         
@@ -215,27 +196,20 @@ class Seq2SeqModel(nn.Module):
         self.decoder_layers = decoder_layers
 
     def _bridge(self, h: torch.Tensor, c: torch.Tensor):
-        # h, c: (2*num_layers, B, H) for bidirectional
         last_h = torch.cat([h[-2], h[-1]], dim=1)  # (B, 2H)
         last_c = torch.cat([c[-2], c[-1]], dim=1)   # (B, 2H)
-        
         dh = self.bridge_hidden(last_h).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         dc = self.bridge_cell(last_c).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         return dh, dc
 
-    def translate(self, src: torch.Tensor, max_length: int, sos_token: int, eos_token: int, src_lengths: Optional[torch.Tensor] = None):
+    def translate(self, src: torch.Tensor, max_length: int, sos_token: int, eos_token: int,
+                  src_lengths: Optional[torch.Tensor] = None):
         self.eval()
         with torch.no_grad():
             batch_size = src.size(0)
-            src_seq_len = src.size(1)
-            
-            # Encoder forward pass
             encoder_outputs, encoder_hidden, encoder_cell = self.encoder(src, src_lengths)
-            
-            # Bridge encoder to decoder
             decoder_hidden, decoder_cell = self._bridge(encoder_hidden, encoder_cell)
             
-            # Create proper attention mask based on encoder outputs
             if src_lengths is not None:
                 mask = torch.zeros(batch_size, encoder_outputs.size(1), device=src.device, dtype=torch.float)
                 for i, length in enumerate(src_lengths):
@@ -243,37 +217,24 @@ class Seq2SeqModel(nn.Module):
             else:
                 mask = (src != 0).float()
             
-            # Initialize decoder input
             decoder_input = torch.full((batch_size, 1), sos_token, device=src.device, dtype=torch.long)
-            
             outputs = []
             attention_weights = []
             
-            for step in range(max_length):
-                # Decoder forward step
+            for _ in range(max_length):
                 logits, decoder_hidden, decoder_cell, att_weights = self.decoder(
                     decoder_input, decoder_hidden, decoder_cell, encoder_outputs, mask
                 )
-                
-                # Get predictions
                 predictions = logits.argmax(dim=1)
                 outputs.append(predictions)
                 attention_weights.append(att_weights)
-                
-                # Prepare next input
                 decoder_input = predictions.unsqueeze(1)
                 
-                # Check for early stopping
                 if (predictions == eos_token).all():
                     break
             
-            # Stack outputs
-            if outputs:
-                final_outputs = torch.stack(outputs, dim=1)  # (B, T)
-                final_attention = torch.stack(attention_weights, dim=1)  # (B, T, S)
-            else:
-                final_outputs = torch.zeros((batch_size, 1), dtype=torch.long, device=src.device)
-                final_attention = torch.zeros((batch_size, 1, encoder_outputs.size(1)), device=src.device)
+            final_outputs = torch.stack(outputs, dim=1) if outputs else torch.zeros((batch_size, 1), dtype=torch.long, device=src.device)
+            final_attention = torch.stack(attention_weights, dim=1) if attention_weights else torch.zeros((batch_size, 1, encoder_outputs.size(1)), device=src.device)
             
             return final_outputs, final_attention
 
@@ -314,26 +275,19 @@ def make_src_tensor(bpe: UrduRomanBPE, urdu_texts: List[str], max_len: int = 50)
     lengths = []
     
     for text in urdu_texts:
-        # Encode the text
         tokens = bpe.encode_urdu(text)
         tokens = [sos] + tokens + [eos]
-        
-        # Record actual length before padding
         actual_length = min(len(tokens), max_len)
         lengths.append(actual_length)
         
-        # Truncate if too long
         if len(tokens) > max_len:
             tokens = tokens[:max_len]
-            tokens[-1] = eos  # Ensure EOS at the end
-        
-        # Pad if too short
+            tokens[-1] = eos
         while len(tokens) < max_len:
             tokens.append(pad)
         
         sequences.append(tokens)
     
-    # Convert to tensors
     src_tensor = torch.tensor(sequences, dtype=torch.long, device=DEVICE)
     len_tensor = torch.tensor(lengths, dtype=torch.long, device=DEVICE)
     
@@ -453,21 +407,15 @@ with col1:
                 if show_debug:
                     st.code(f"Token IDs: {pred_ids}")
             
-            # Attention visualization
             with st.expander("🔍 Show Attention Heatmap"):
                 if attention is not None and attention.numel() > 0:
                     att_matrix = attention[0].cpu().numpy()
                     src_tokens = urdu_token_visuals(bpe, urdu_input, max_len)
                     tgt_tokens = translation.split() if translation.strip() else ["<empty>"]
                     
-                    # Ensure dimensions match
-                    if att_matrix.shape[0] > len(tgt_tokens):
-                        att_matrix = att_matrix[:len(tgt_tokens), :]
-                    if att_matrix.shape[1] > len(src_tokens):
-                        att_matrix = att_matrix[:, :len(src_tokens)]
-                    
-                    draw_attention(att_matrix, src_tokens[:att_matrix.shape[1]], 
-                                 tgt_tokens[:att_matrix.shape[0]])
+                    min_len = min(att_matrix.shape[0], len(tgt_tokens))
+                    att_matrix = att_matrix[:min_len, :min(att_matrix.shape[1], len(src_tokens))]
+                    draw_attention(att_matrix, src_tokens[:att_matrix.shape[1]], tgt_tokens[:att_matrix.shape[0]])
                 else:
                     st.warning("No attention weights available")
                     
