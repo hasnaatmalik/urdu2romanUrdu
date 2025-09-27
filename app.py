@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 # -------------------------
 # Constants
 # -------------------------
-DEFAULT_BPE_PATH = "bpe_model.pkl"
-DEFAULT_CKPT_PATH = "best_model.pt"
+DEFAULT_BPE_PATH = "/models/bpe_model.pkl"
+DEFAULT_CKPT_PATH = "/models/best_model.pt"
 DEFAULT_URDU_FILE = "urdu.txt"
 DEFAULT_ROMAN_FILE = "roman.txt"
 
