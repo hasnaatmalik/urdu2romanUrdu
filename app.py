@@ -211,23 +211,23 @@ class Seq2Seq(nn.Module):
 # Caching and Helper Functions
 # -------------------------
 @st.cache_resource(show_spinner=True)
-def load_model(ckpt_path: str, bpe: UrduRomanBPE):
-    enc_vocab = len(bpe.urdu_vocab)
-    dec_vocab = len(bpe.roman_vocab)
-    encoder = Encoder(enc_vocab, 256, 512, 2, 0.3, bpe.urdu_vocab['<PAD>']).to(DEVICE)
-    decoder = Decoder(dec_vocab, 256, 512, 3, 0.3, bpe.roman_vocab['<PAD>']).to(DEVICE)
-    model = Seq2Seq(encoder, decoder, bpe.urdu_vocab['<PAD>']).to(DEVICE)
+def load_bpe(bpe_path: str):
+    bpe = UrduRomanBPE()
+    bpe.load_model(bpe_path)
+    return bpe
+
+@st.cache_resource(show_spinner=True)
+def load_model(_bpe, ckpt_path: str):  # Added underscore to _bpe to avoid hashing
+    enc_vocab = len(_bpe.urdu_vocab)
+    dec_vocab = len(_bpe.roman_vocab)
+    encoder = Encoder(enc_vocab, 256, 512, 2, 0.3, _bpe.urdu_vocab['<PAD>']).to(DEVICE)
+    decoder = Decoder(dec_vocab, 256, 512, 3, 0.3, _bpe.roman_vocab['<PAD>']).to(DEVICE)
+    model = Seq2Seq(encoder, decoder, _bpe.urdu_vocab['<PAD>']).to(DEVICE)
     
     ckpt = torch.load(ckpt_path, map_location=DEVICE)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
     return model
-
-@st.cache_resource(show_spinner=True)
-def load_bpe(bpe_path: str):
-    bpe = UrduRomanBPE()
-    bpe.load_model(bpe_path)
-    return bpe
 
 def make_src_tensor(bpe: UrduRomanBPE, urdu_texts: List[str], max_len: int = 50) -> Tuple[torch.Tensor, torch.Tensor]:
     sequences = []
@@ -301,7 +301,7 @@ if 'bpe' not in st.session_state or load_btn:
 if 'model' not in st.session_state or load_btn:
     try:
         if 'bpe' in st.session_state:
-            st.session_state.model = load_model(ckpt_path, st.session_state.bpe)
+            st.session_state.model = load_model(st.session_state.bpe, ckpt_path)
             st.success("✅ Translation model loaded")
     except Exception as e:
         st.error(f"❌ Model loading failed: {e}")
@@ -335,7 +335,6 @@ if st.button("Transliterate") and bpe and model:
             
             with st.expander("🔍 Show Attention Heatmap"):
                 if hasattr(model.dec, 'attn') and model.dec.attn is not None:
-                    # Note: This is a simplification; actual attention weights would need to be captured during decode
                     st.warning("Attention heatmap not fully implemented with this decode method.")
                 else:
                     st.warning("No attention weights available")
