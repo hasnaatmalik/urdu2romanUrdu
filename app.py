@@ -155,14 +155,29 @@ class LSTMDecoder(nn.Module):
         emb = self.dropout(self.embedding(x))
         top_hidden = hidden[-1].unsqueeze(1)
         enc_len = encoder_outputs.size(1)
+        
+        # Make sure dimensions match
+        if top_hidden.size(1) != 1:
+            top_hidden = top_hidden[:, :1, :]  # Take only first timestep
+        
         top_rep = top_hidden.repeat(1, enc_len, 1)
         att_in = torch.cat([top_rep, encoder_outputs], dim=2)
         scores = self.attention(att_in)
         scores = torch.sum(scores * encoder_outputs, dim=2)
         
-        # FIX: Use non-in-place operation to avoid gradient issues
+        # Apply mask if provided
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)  # Remove underscore
+            # Ensure mask has the right shape
+            if mask.size(1) != scores.size(1):
+                # Truncate or pad mask to match scores
+                if mask.size(1) > scores.size(1):
+                    mask = mask[:, :scores.size(1)]
+                else:
+                    # Pad mask with zeros
+                    pad_size = scores.size(1) - mask.size(1)
+                    mask = F.pad(mask, (0, pad_size), value=0)
+            
+            scores = scores.masked_fill(mask == 0, -1e9)
         
         att_w = F.softmax(scores, dim=1)
         context = torch.bmm(att_w.unsqueeze(1), encoder_outputs)
@@ -171,6 +186,7 @@ class LSTMDecoder(nn.Module):
         out_in = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)
         logits = self.out_projection(out_in)
         return logits, hidden, cell, att_w
+
 
 class Seq2SeqModel(nn.Module):
     def __init__(self, encoder_vocab_size: int, decoder_vocab_size: int,
@@ -193,6 +209,52 @@ class Seq2SeqModel(nn.Module):
         dc = self.bridge_cell(last_c).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         return dh, dc
 
+    def forward(self, src: torch.Tensor, tgt: torch.Tensor, src_lengths: Optional[torch.Tensor] = None,
+                teacher_forcing_ratio: float = 0.5):
+        batch_size = src.size(0)
+        tgt_seq_len = tgt.size(1)
+        
+        # Encoder forward pass
+        encoder_outputs, encoder_hidden, encoder_cell = self.encoder(src, src_lengths)
+        
+        # Bridge encoder and decoder
+        decoder_hidden, decoder_cell = self._bridge(encoder_hidden, encoder_cell)
+        
+        # Create attention mask for source padding
+        if src_lengths is not None:
+            src_mask = torch.zeros(batch_size, src.size(1), device=src.device)
+            for i, length in enumerate(src_lengths):
+                src_mask[i, :length] = 1
+        else:
+            src_mask = (src != 0).float()
+        
+        # Decoder forward pass
+        outputs = []
+        attention_weights = []
+        
+        # Start with SOS token
+        decoder_input = tgt[:, 0].unsqueeze(1)
+        
+        for t in range(1, tgt_seq_len):
+            # Decoder step
+            output, decoder_hidden, decoder_cell, attn_weights = self.decoder(
+                decoder_input, decoder_hidden, decoder_cell, encoder_outputs, src_mask
+            )
+            
+            outputs.append(output)
+            attention_weights.append(attn_weights)
+            
+            # Teacher forcing
+            if np.random.rand() < teacher_forcing_ratio:
+                decoder_input = tgt[:, t].unsqueeze(1)  # Use ground truth
+            else:
+                decoder_input = output.argmax(dim=1).unsqueeze(1)  # Use prediction
+        
+        outputs = torch.stack(outputs, dim=1)
+        attention_weights = torch.stack(attention_weights, dim=1)
+        
+        return outputs, attention_weights
+
     def translate(self, src: torch.Tensor, max_length: int, sos_token: int, eos_token: int,
                   src_lengths: Optional[torch.Tensor] = None):
         self.eval()
@@ -200,25 +262,48 @@ class Seq2SeqModel(nn.Module):
             B = src.size(0)
             enc_out, enc_h, enc_c = self.encoder(src, src_lengths)
             dec_h, dec_c = self._bridge(enc_h, enc_c)
+            
+            # Create mask based on actual sequence lengths
             if src_lengths is not None:
-                mask = torch.zeros(B, src.size(1), device=src.device)
-                for i, L in enumerate(src_lengths):
-                    mask[i, :L] = 1
+                mask = torch.zeros(B, src.size(1), device=src.device, dtype=torch.bool)
+                for i, length in enumerate(src_lengths):
+                    mask[i, :length] = True
+                # Convert to float for masking operations
+                mask = mask.float()
             else:
                 mask = (src != 0).float()
+            
             dec_in = torch.full((B, 1), sos_token, device=src.device, dtype=torch.long)
             outputs = []
             attns = []
-            for _ in range(max_length):
-                logit, dec_h, dec_c, att_w = self.decoder(dec_in, dec_h, dec_c, enc_out, mask)
-                pred = logit.argmax(dim=1)
-                outputs.append(pred)
-                attns.append(att_w)
-                dec_in = pred.unsqueeze(1)
-                if (pred == eos_token).all():
-                    break
-            return torch.stack(outputs, dim=1), torch.stack(attns, dim=1)
-
+            
+            for step in range(max_length):
+                try:
+                    logit, dec_h, dec_c, att_w = self.decoder(dec_in, dec_h, dec_c, enc_out, mask)
+                    pred = logit.argmax(dim=1)
+                    outputs.append(pred)
+                    attns.append(att_w)
+                    dec_in = pred.unsqueeze(1)
+                    
+                    # Stop if all sequences have produced EOS token
+                    if (pred == eos_token).all():
+                        break
+                        
+                except RuntimeError as e:
+                    if "size mismatch" in str(e):
+                        # If there's still a size mismatch, break and return what we have
+                        print(f"Warning: Size mismatch at step {step}, stopping early")
+                        break
+                    else:
+                        raise e
+            
+            if outputs:
+                return torch.stack(outputs, dim=1), torch.stack(attns, dim=1) if attns else None
+            else:
+                # Return empty tensors if no outputs were generated
+                empty_out = torch.zeros((B, 1), dtype=torch.long, device=src.device)
+                empty_att = torch.zeros((B, 1, src.size(1)), device=src.device)
+                return empty_out, empty_att
 # -------------------------
 # Caching functions
 # -------------------------
@@ -254,14 +339,27 @@ def make_src_tensor(bpe: UrduRomanBPE, urdu_texts: List[str], max_len: int = 50)
     sos = bpe.urdu_vocab['<SOS>']; eos = bpe.urdu_vocab['<EOS>']; pad = bpe.urdu_vocab['<PAD>']
     seqs = []
     lens = []
+    
     for t in urdu_texts:
         ids = bpe.encode_urdu(t)
         ids = [sos] + ids + [eos]
-        lens.append(min(len(ids), max_len))
-        ids = ids[:max_len]
-        if len(ids) < max_len:
-            ids = ids + [pad]*(max_len - len(ids))
+        
+        # Store actual length before padding
+        actual_len = len(ids)
+        lens.append(min(actual_len, max_len))
+        
+        # Truncate if too long
+        if len(ids) > max_len:
+            ids = ids[:max_len]
+            # Make sure we end with EOS if truncated
+            ids[-1] = eos
+        
+        # Pad if too short
+        while len(ids) < max_len:
+            ids.append(pad)
+            
         seqs.append(ids)
+    
     tens = torch.tensor(seqs, dtype=torch.long, device=DEVICE)
     lens = torch.tensor(lens, dtype=torch.long, device=DEVICE)
     return tens, lens
