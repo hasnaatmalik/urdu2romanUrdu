@@ -1,9 +1,6 @@
 import os
-import io
-import json
-import time
-import math
 import pickle
+import time
 from typing import List, Optional, Dict, Tuple
 import re
 from collections import defaultdict
@@ -51,13 +48,6 @@ class UrduRomanBPE:
         text = re.sub(r'\s+', ' ', text.strip())
         text = re.sub(r'[۔؟!]', ' <EOS> ', text)
         text = re.sub(r'[،؍]', ' ', text)
-        return text.strip()
-
-    def _preprocess_roman_text(self, text: str) -> str:
-        text = text.lower().strip()
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[.!?]', ' <EOS> ', text)
-        text = re.sub(r'[,;:]', ' ', text)
         return text.strip()
 
     def _get_word_tokens(self, word: str) -> List[str]:
@@ -144,6 +134,7 @@ class LSTMDecoder(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
+        # CRITICAL: Match training notebook names
         self.attention = nn.Linear(hidden_dim + encoder_hidden_dim * 2, encoder_hidden_dim * 2)
         self.out_projection = nn.Linear(hidden_dim + encoder_hidden_dim * 2, vocab_size)
         self.dropout = nn.Dropout(dropout)
@@ -153,34 +144,31 @@ class LSTMDecoder(nn.Module):
         batch_size = x.size(0)
         enc_seq_len = encoder_outputs.size(1)
         
-        emb = self.dropout(self.embedding(x))  # (B, 1, E)
-        top_hidden = hidden[-1].unsqueeze(1)   # (B, 1, H)
+        emb = self.dropout(self.embedding(x))
+        top_hidden = hidden[-1].unsqueeze(1)
         
-        top_hidden_repeated = top_hidden.repeat(1, enc_seq_len, 1)  # (B, S, H)
+        top_hidden_repeated = top_hidden.repeat(1, enc_seq_len, 1)
+        att_input = torch.cat([top_hidden_repeated, encoder_outputs], dim=2)
         
-        att_input = torch.cat([top_hidden_repeated, encoder_outputs], dim=2)  # (B, S, H + 2H)
-        
-        att_scores = self.attention(att_input)  # (B, S, 2H)
+        att_scores = self.attention(att_input)
+        scores = torch.sum(att_scores * encoder_outputs, dim=2)
         
         if mask is not None:
-            if mask.shape[1] != enc_seq_len:
-                if mask.shape[1] > enc_seq_len:
-                    mask = mask[:, :enc_seq_len]
-                else:
-                    pad_size = enc_seq_len - mask.shape[1]
+            if mask.shape != scores.shape:
+                mask = mask[:, :scores.size(1)]
+                if mask.size(1) < scores.size(1):
+                    pad_size = scores.size(1) - mask.size(1)
                     mask = F.pad(mask, (0, pad_size), value=0.0)
-            att_scores = att_scores.masked_fill(mask.unsqueeze(2) == 0, -1e9)
+            scores = scores.masked_fill(mask == 0, -1e9)
         
-        att_weights = F.softmax(att_scores.sum(dim=2), dim=1)  # (B, S)
+        att_weights = F.softmax(scores, dim=1)
+        context = torch.bmm(att_weights.unsqueeze(1), encoder_outputs)
         
-        context = torch.bmm(att_weights.unsqueeze(1), encoder_outputs)  # (B, 1, 2H)
-        
-        lstm_input = torch.cat([emb, context], dim=2)  # (B, 1, E + 2H)
-        
+        lstm_input = torch.cat([emb, context], dim=2)
         lstm_out, (hidden, cell) = self.lstm(lstm_input, (hidden, cell))
         
-        output_input = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)  # (B, H + 2H)
-        logits = self.out_projection(output_input)  # (B, V)
+        output_input = torch.cat([lstm_out.squeeze(1), context.squeeze(1)], dim=1)
+        logits = self.out_projection(output_input)
         
         return logits, hidden, cell, att_weights
 
@@ -199,8 +187,8 @@ class Seq2SeqModel(nn.Module):
         self.decoder_layers = decoder_layers
 
     def _bridge(self, h: torch.Tensor, c: torch.Tensor):
-        last_h = torch.cat([h[-2], h[-1]], dim=1)  # (B, 2H)
-        last_c = torch.cat([c[-2], c[-1]], dim=1)   # (B, 2H)
+        last_h = torch.cat([h[-2], h[-1]], dim=1)
+        last_c = torch.cat([c[-2], c[-1]], dim=1)
         
         dh = self.bridge_hidden(last_h).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         dc = self.bridge_cell(last_c).unsqueeze(0).repeat(self.decoder_layers, 1, 1)
@@ -211,43 +199,74 @@ class Seq2SeqModel(nn.Module):
         self.eval()
         with torch.no_grad():
             batch_size = src.size(0)
+            src_seq_len = src.size(1)
             
             encoder_outputs, encoder_hidden, encoder_cell = self.encoder(src, src_lengths)
-            enc_seq_len = encoder_outputs.size(1)
-            
             decoder_hidden, decoder_cell = self._bridge(encoder_hidden, encoder_cell)
             
             if src_lengths is not None:
-                mask = torch.zeros(batch_size, enc_seq_len, device=src.device, dtype=torch.float)
+                mask = torch.zeros(batch_size, src_seq_len, device=src.device, dtype=torch.float)
                 for i, length in enumerate(src_lengths):
-                    mask[i, :min(length.item(), enc_seq_len)] = 1.0
+                    mask[i, :min(length.item(), src_seq_len)] = 1.0
             else:
-                mask = (src[:, :enc_seq_len] != 0).float()
+                mask = (src != 0).float()
+            
+            if mask.size(1) != encoder_outputs.size(1):
+                if mask.size(1) > encoder_outputs.size(1):
+                    mask = mask[:, :encoder_outputs.size(1)]
+                else:
+                    pad_size = encoder_outputs.size(1) - mask.size(1)
+                    mask = F.pad(mask, (0, pad_size), value=0.0)
             
             decoder_input = torch.full((batch_size, 1), sos_token, device=src.device, dtype=torch.long)
             
             outputs = []
+            attention_weights = []
+            
+            # CRITICAL FIX: Track previous predictions to detect loops
+            prev_pred = None
+            repeat_count = 0
+            max_repeats = 3  # Stop if same token repeats 3 times
             
             for step in range(max_length):
-                logits, decoder_hidden, decoder_cell, _ = self.decoder(
+                logits, decoder_hidden, decoder_cell, att_weights = self.decoder(
                     decoder_input, decoder_hidden, decoder_cell, encoder_outputs, mask
                 )
-                predictions = logits.argmax(dim=1)
-                outputs.append(predictions)
-                decoder_input = predictions.unsqueeze(1)
                 
-                if (predictions == eos_token).all():
+                # Get prediction
+                predictions = logits.argmax(dim=1)
+                
+                # CRITICAL: Detect repetition loops
+                if prev_pred is not None and (predictions == prev_pred).all():
+                    repeat_count += 1
+                    if repeat_count >= max_repeats:
+                        # Force EOS token to stop loop
+                        predictions = torch.full_like(predictions, eos_token)
+                else:
+                    repeat_count = 0
+                
+                prev_pred = predictions.clone()
+                
+                outputs.append(predictions)
+                attention_weights.append(att_weights)
+                
+                # Check for EOS - stop if ANY sequence generates EOS
+                if (predictions == eos_token).any():
                     break
+                
+                decoder_input = predictions.unsqueeze(1)
             
             if outputs:
                 final_outputs = torch.stack(outputs, dim=1)
+                final_attention = torch.stack(attention_weights, dim=1)
             else:
                 final_outputs = torch.zeros((batch_size, 1), dtype=torch.long, device=src.device)
+                final_attention = torch.zeros((batch_size, 1, src_seq_len), device=src.device)
             
-            return final_outputs
+            return final_outputs, final_attention
 
 # -------------------------
-# Caching and Helper Functions
+# Helper Functions
 # -------------------------
 @st.cache_resource(show_spinner=True)
 def load_bpe(bpe_path: str):
@@ -256,20 +275,14 @@ def load_bpe(bpe_path: str):
     return bpe
 
 @st.cache_resource(show_spinner=True)
-def load_model(_bpe: UrduRomanBPE, ckpt_path: str):
+def load_model(ckpt_path: str, _bpe: UrduRomanBPE):
     enc_vocab = len(_bpe.urdu_vocab)
     dec_vocab = len(_bpe.roman_vocab)
     model = Seq2SeqModel(encoder_vocab_size=enc_vocab, decoder_vocab_size=dec_vocab,
                         embedding_dim=256, encoder_hidden_dim=512, decoder_hidden_dim=512,
                         encoder_layers=2, decoder_layers=4, dropout=0.3)
     ckpt = torch.load(ckpt_path, map_location=DEVICE)
-    state_dict = ckpt['model_state_dict']
-    # Handle potential key mismatches
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        new_key = k.replace('encoder.', 'enc.').replace('decoder.', 'dec.').replace('bridge_hidden', 'bridge_hidden').replace('bridge_cell', 'bridge_cell')
-        new_state_dict[new_key] = v
-    model.load_state_dict(new_state_dict, strict=False)
+    model.load_state_dict(ckpt['model_state_dict'])
     model.to(DEVICE)
     model.eval()
     history = {
@@ -291,12 +304,13 @@ def make_src_tensor(bpe: UrduRomanBPE, urdu_texts: List[str], max_len: int = 50)
     for text in urdu_texts:
         tokens = bpe.encode_urdu(text)
         tokens = [sos] + tokens + [eos]
-        actual_length = len(tokens)
+        
+        actual_length = min(len(tokens), max_len)
         lengths.append(actual_length)
         
         if len(tokens) > max_len:
-            tokens = tokens[:max_len-1] + [eos]
-            lengths[-1] = max_len
+            tokens = tokens[:max_len]
+            tokens[-1] = eos
         
         while len(tokens) < max_len:
             tokens.append(pad)
@@ -326,47 +340,43 @@ def decode_pred_tokens(bpe: UrduRomanBPE, pred_ids: List[int]) -> str:
 # Streamlit UI
 # -------------------------
 st.set_page_config(page_title="Urdu → Roman Urdu", page_icon="🔤", layout="wide")
-st.title("🔤 Urdu → Roman Urdu Translator")
-st.caption(f"Device: **{DEVICE}**")
+st.title("Urdu to Roman Urdu Translator")
+st.caption(f"Device: {DEVICE}")
 
 with st.sidebar:
     st.header("Model Settings")
     bpe_path = st.text_input("BPE model path", value=DEFAULT_BPE_PATH)
     ckpt_path = st.text_input("Model checkpoint path", value=DEFAULT_CKPT_PATH)
     max_len = st.slider("Max sequence length", min_value=16, max_value=100, value=50, step=2)
-    show_debug = st.checkbox("Show debug info", value=False)
     
     load_btn = st.button("Load/Reload Models")
 
-# Load models
 if 'bpe' not in st.session_state or load_btn:
     try:
         st.session_state.bpe = load_bpe(bpe_path)
-        st.success("✅ BPE model loaded")
+        st.success("BPE model loaded")
     except Exception as e:
-        st.error(f"❌ BPE loading failed: {e}")
+        st.error(f"BPE loading failed: {e}")
 
 if 'model' not in st.session_state or load_btn:
     try:
         if 'bpe' in st.session_state:
-            st.session_state.model, st.session_state.history = load_model(st.session_state.bpe, ckpt_path)
-            st.success("✅ Translation model loaded")
+            st.session_state.model, st.session_state.history = load_model(ckpt_path, st.session_state.bpe)
+            st.success("Translation model loaded")
         else:
-            st.warning("⚠️ Load BPE model first")
+            st.warning("Load BPE model first")
     except Exception as e:
-        st.error(f"❌ Model loading failed: {e}")
+        st.error(f"Model loading failed: {e}")
 
 bpe = st.session_state.get('bpe')
 model = st.session_state.get('model')
-history = st.session_state.get('history', {})
 
-# Main interface
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("Single Translation")
     urdu_input = st.text_area("Enter Urdu text:", 
-                             value="تو کبھی خود کو بھی دیکھے گا تو ڈر جائے گا", 
+                             value="آج موسم بہت اچھا ہے", 
                              height=100)
     
     if st.button("Translate", type="primary") and bpe and model:
@@ -377,7 +387,7 @@ with col1:
                 eos_token = bpe.roman_vocab['<EOS>']
                 
                 start_time = time.time()
-                predictions = model.translate(
+                predictions, attention = model.translate(
                     src_tensor, max_length=max_len, 
                     sos_token=sos_token, eos_token=eos_token, 
                     src_lengths=src_lengths
@@ -388,19 +398,14 @@ with col1:
                 translation = decode_pred_tokens(bpe, pred_ids)
                 
                 st.write("**Translation:**")
-                st.write(f"🇺🇷 {translation}")
-                st.caption(f"⏱️ Inference time: {inference_time:.1f}ms")
-                
-                if show_debug:
-                    st.code(f"Token IDs: {pred_ids}")
-            
+                st.write(f"{translation}")
+                st.caption(f"Inference time: {inference_time:.1f}ms")
+                    
         except Exception as e:
-            st.error(f"❌ Translation failed: {str(e)}")
+            st.error(f"Translation failed: {str(e)}")
 
 with col2:
     st.subheader("Batch Translation")
-    st.caption("One sentence per line")
-    
     batch_input = st.text_area("Enter multiple Urdu sentences:",
                                value="میں آپ سے محبت کرتا ہوں\nآج موسم بہت اچھا ہے",
                                height=100)
@@ -418,7 +423,7 @@ with col2:
                     sos_token = bpe.roman_vocab['<SOS>']
                     eos_token = bpe.roman_vocab['<EOS>']
                     
-                    predictions = model.translate(
+                    predictions, _ = model.translate(
                         src_tensor, max_length=max_len,
                         sos_token=sos_token, eos_token=eos_token,
                         src_lengths=src_lengths
@@ -432,37 +437,7 @@ with col2:
                         st.write("---")
                         
             except Exception as e:
-                st.error(f"❌ Batch translation failed: {str(e)}")
-        else:
-            st.warning("No valid sentences found")
-
-# Training curves
-if history:
-    st.markdown("---")
-    st.subheader("📈 Training History")
-    
-    chart_cols = st.columns(3)
-    
-    with chart_cols[0]:
-        if 'train_losses' in history and history['train_losses']:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(history['train_losses'])
-            ax.set_title("Training Loss")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Loss")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-    
-    with chart_cols[1]:
-        if 'val_losses' in history and history['val_losses']:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(history['val_losses'])
-            ax.set_title("Validation Loss")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Loss")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-    
+                st.error(f"Batch translation failed: {str(e)}")
 
 st.markdown("---")
-st.caption("🚀 Urdu-Roman Neural Machine Translation • Built with PyTorch & Streamlit")
+st.caption("Urdu-Roman Neural Machine Translation")
