@@ -376,7 +376,7 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("Single Translation")
     urdu_input = st.text_area("Enter Urdu text:", 
-                             value="آج موسم بہت اچھا ہے", 
+                             value="آنکھ سے دور نہ ہو دل سے اتر جائے گا", 
                              height=100)
     
     if st.button("Translate", type="primary") and bpe and model:
